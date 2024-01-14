@@ -283,6 +283,52 @@ FONT-LOADER, if present, otherwise NIL.")
       (error "Could not find supported character map in font file~% available cmap tables = ~s"
              cmaps))))
 
+
+(defclass format-0-cmap ()
+  ((glyph-index-array :initform (make-array 256 :element-type '(unsigned-byte 8))
+		      :reader glyph-index-array)))
+
+(defun %load-cmap-format-0 (font-loader)
+  "Load a single-byte character map of type 0 from STREAM starting at the
+current offset."
+  (seek-to-table "cmap" font-loader)
+  (with-slots (input-stream)
+      font-loader
+    (let ((start-pos (file-position input-stream))
+	  (version-number (read-uint16 input-stream))
+	  (subtable-count (read-uint16 input-stream))
+	  (foundp nil))
+      (declare (ignore version-number))
+      (loop repeat subtable-count
+	    for platform-id = (read-uint16 input-stream)
+	    for platform-specific-id = (read-uint16 input-stream)
+	    for offset = (+ start-pos (read-uint32 input-stream))
+	    when (and (= platform-id +macintosh-platform-id+)
+		      (= platform-specific-id 0)) ; 1 or 0?
+	      do (file-position input-stream offset)
+		 (let ((format (read-uint16 input-stream))
+		       (length (read-uint16 input-stream))
+		       (language (read-uint16 input-stream)))
+		   (declare (ignore language))
+		   (assert (and (= 0 format) (= 262 length)))
+		   (let ((cmap (make-instance 'format-0-cmap)))
+		     (read-sequence (glyph-index-array cmap) input-stream)
+		     (setf (character-map font-loader) cmap
+			   (inverse-character-map font-loader) (invert-format-0-cmap cmap)
+			   foundp t)
+		     (return))))
+      foundp)))
+		   
+(defmethod code-point-font-index-from-cmap (code-point (cmap format-0-cmap))
+  (position code-point (glyph-index-array cmap)))
+
+(defun invert-format-0-cmap (cmap)
+  (let ((inverse (make-array 256 :element-type '(unsigned-byte 8))))
+    (loop for code-point across (glyph-index-array cmap)
+	  for index from 0
+	  do (setf (aref inverse code-point) index))
+    inverse))
+
 (defmethod load-cmap-info ((font-loader font-loader))
   (or (%load-cmap-info font-loader +unicode-platform-id+
                        +unicode-2.0-full-encoding-id+) ;; full unicode
@@ -296,6 +342,7 @@ FONT-LOADER, if present, otherwise NIL.")
                        '(0 1 2 3 4)) ;; all except variation and last-resort
       (%load-cmap-info font-loader +microsoft-platform-id+
                        +microsoft-symbol-encoding-id+) ;; ms symbol
+      (%load-cmap-format-0 font-loader) ;; ADDED BY JQS
       (%unknown-cmap-error font-loader)))
 
 (defun available-character-maps (loader)
